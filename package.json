@@ -28,6 +28,8 @@
     "publish:release": "npm run build && electron-builder -c electron-builder.config.cjs --publish always",
     "publish:beta": "npm run build && electron-builder -c electron-builder.beta.config.cjs --publish always",
     "test:parser": "node --test tests/markdown.test.mjs",
+    "test:voice": "node --test tests/voice.test.mjs",
+    "test:release-config": "node scripts/verify-release-config.cjs",
     "test:e2e": "npm run build && node tests/e2e-electron.mjs",
     "test:e2e:dev": "node tests/e2e-electron.mjs --dev",
     "start": "npm run run",

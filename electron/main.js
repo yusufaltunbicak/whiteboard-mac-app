@@ -4,6 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createBoardStore } from './boardStore.js';
+import { createVoiceStore } from './voiceStore.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -11,12 +12,9 @@ const isDevServer = process.env.WHITEBOARD_ELECTRON_LOAD !== 'dist' && !app.isPa
 const devServerUrl = process.env.VITE_DEV_SERVER_URL || 'http://127.0.0.1:5173';
 const { autoUpdater } = electronUpdater;
 
-if (process.env.WHITEBOARD_USER_DATA_PATH) {
-  app.setPath('userData', process.env.WHITEBOARD_USER_DATA_PATH);
-}
-
 let mainWindow = null;
 let store = null;
+let voiceStore = null;
 
 function getAppDisplayName() {
   return process.env.WHITEBOARD_PRODUCT_NAME || app.getName() || 'Whiteboard Todos';
@@ -31,10 +29,20 @@ function isBetaApp() {
   return getReleaseChannel() === 'beta' || getAppDisplayName().toLowerCase().includes('beta');
 }
 
+function getDefaultUserDataPath() {
+  const folderName = isBetaApp() ? 'Whiteboard Todos Beta' : 'Whiteboard Todos';
+  return path.join(os.homedir(), 'Library', 'Application Support', folderName);
+}
+
 function getBoardPathOverride() {
   if (process.env.WHITEBOARD_TODOS_PATH) return process.env.WHITEBOARD_TODOS_PATH;
   if (!isBetaApp()) return undefined;
   return path.join(os.homedir(), 'Documents', 'Second brain', 'whiteboard-todos-beta.md');
+}
+
+function configureAppIdentity() {
+  app.setName(getAppDisplayName());
+  app.setPath('userData', process.env.WHITEBOARD_USER_DATA_PATH || getDefaultUserDataPath());
 }
 
 function updatesAreDisabled() {
@@ -134,6 +142,12 @@ function buildMenu() {
       ],
     },
     {
+      label: 'Voice',
+      submenu: voiceStore?.buildMenuItems() || [
+        { label: 'Voice unavailable', enabled: false },
+      ],
+    },
+    {
       label: 'View',
       submenu: [
         { role: 'reload' },
@@ -196,6 +210,33 @@ function registerIpc() {
     userDataPath: app.getPath('userData'),
     packaged: app.isPackaged,
   }));
+  ipcMain.handle('voice:getSettings', () => voiceStore.getSettings());
+  ipcMain.handle('voice:updateSettings', (_event, patch) => {
+    const result = voiceStore.updateSettings(patch);
+    buildMenu();
+    return result;
+  });
+  ipcMain.handle('voice:setApiKey', (_event, apiKey) => voiceStore.setApiKey(apiKey));
+  ipcMain.handle('voice:hasApiKey', () => voiceStore.hasApiKey());
+  ipcMain.handle('voice:clearApiKey', () => voiceStore.clearApiKey());
+  ipcMain.handle('voice:createRealtimeCall', (_event, localSdp) => voiceStore.createRealtimeCall(localSdp));
+  ipcMain.handle('voice:endRealtimeSession', () => voiceStore.endRealtimeSession());
+  ipcMain.handle('voice:classifyRequest', (_event, input) => voiceStore.classifyRequest(input));
+  ipcMain.handle('voice:getRuntimeContext', () => voiceStore.getRuntimeContext());
+  ipcMain.handle('voice:executeBoardActions', (_event, actions, metadata) => voiceStore.executeBoardActions(actions, metadata));
+  ipcMain.handle('voice:undoLastAction', () => voiceStore.undoLastAction());
+  ipcMain.handle('voice:searchContext', (_event, query, options) => voiceStore.searchContext(query, options));
+  ipcMain.handle('voice:readContextFile', (_event, input) => voiceStore.readContextFile(input));
+  ipcMain.handle('voice:proposeTaskDraft', (_event, input) => voiceStore.proposeTaskDraft(input));
+  ipcMain.handle('voice:listTaskDrafts', () => voiceStore.listTaskDrafts());
+  ipcMain.handle('voice:updateTaskDraft', (_event, input) => voiceStore.updateTaskDraft(input));
+  ipcMain.handle('voice:discardTaskDraft', (_event, input) => voiceStore.discardTaskDraft(input));
+  ipcMain.handle('voice:applyTaskDraft', (_event, input) => voiceStore.applyTaskDraft(input));
+  ipcMain.handle('voice:requestFolderAccess', (_event, reason) => voiceStore.requestFolderAccess(reason));
+  ipcMain.handle('voice:readAssistantDocs', () => voiceStore.readAssistantDocs());
+  ipcMain.handle('voice:proposeMemoryEntry', (_event, proposal) => voiceStore.proposeMemoryEntry(proposal));
+  ipcMain.handle('voice:applyMemoryEntry', (_event, input) => voiceStore.applyMemoryEntry(input));
+  ipcMain.handle('voice:updateSessionSummary', (_event, input) => voiceStore.updateSessionSummary(input));
 }
 
 function configureAutoUpdates() {
@@ -252,13 +293,19 @@ function configureAutoUpdates() {
 }
 
 app.whenReady().then(async () => {
-  app.setName(getAppDisplayName());
+  configureAppIdentity();
   store = createBoardStore({
     userDataPath: app.getPath('userData'),
     boardPath: getBoardPathOverride(),
   });
+  voiceStore = createVoiceStore({
+    userDataPath: app.getPath('userData'),
+    boardStore: store,
+    getWindow: () => mainWindow,
+  });
   store.restartWatchers();
   store.on('changed', sendBoardChanged);
+  voiceStore.initialize();
   registerIpc();
   buildMenu();
   await createWindow();
@@ -270,6 +317,7 @@ app.whenReady().then(async () => {
 });
 
 app.on('before-quit', () => {
+  voiceStore?.close();
   store?.close();
 });
 

@@ -49,3 +49,8 @@ export async function refreshSync() {
   if (!hasElectronApi()) return null;
   return window.whiteboard.refreshSync();
 }
+
+export function getVoiceApi() {
+  if (!hasElectronApi()) return null;
+  return window.whiteboard.voice || null;
+}

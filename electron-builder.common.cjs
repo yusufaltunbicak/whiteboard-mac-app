@@ -48,6 +48,7 @@ function createConfig({
       ],
       extendInfo: {
         NSHumanReadableCopyright: 'Copyright © 2026 Yusuf Altunbıçak',
+        NSMicrophoneUsageDescription: 'Whiteboard Todos uses the microphone when you turn on the voice assistant to manage your board by speech.',
       },
     },
     dmg: {

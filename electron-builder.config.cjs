@@ -5,4 +5,5 @@ module.exports = createConfig({
   productName: 'Whiteboard Todos',
   artifactPrefix: 'Whiteboard-Todos',
   channel: 'latest',
+  version: process.env.RELEASE_VERSION,
 });

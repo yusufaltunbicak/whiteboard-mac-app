@@ -8,11 +8,13 @@ import ContextMenu from './components/ContextMenu';
 import {
   chooseSyncFolders,
   getBoard,
+  getVoiceApi,
   isElectronRuntime,
   onBoardChanged,
   refreshSync,
   saveBoard as persistBoard,
 } from './whiteboardApi';
+import { RealtimeVoiceController, createVoiceBoardSnapshot } from './voiceAgent';
 
 const GRID_SIZE = 30;
 const MIN_ZOOM = 0.15;
@@ -114,9 +116,22 @@ export default function App() {
   const [selectedTaskIds, setSelectedTaskIds] = useState([]);
   const [bulkContextMenu, setBulkContextMenu] = useState(null);
   const [bulkCategoryMenu, setBulkCategoryMenu] = useState(null);
+  const [voiceStatus, setVoiceStatus] = useState('offline');
+  const [voiceStatusDetail, setVoiceStatusDetail] = useState(null);
+  const [voiceSettings, setVoiceSettings] = useState(null);
+  const [voicePanelOpen, setVoicePanelOpen] = useState(false);
+  const [voiceApiKeyDraft, setVoiceApiKeyDraft] = useState('');
+  const [voiceHasApiKey, setVoiceHasApiKey] = useState(false);
+  const [voiceTranscript, setVoiceTranscript] = useState([]);
+  const [voiceError, setVoiceError] = useState(null);
+  const [voiceUndoAvailable, setVoiceUndoAvailable] = useState(false);
+  const [voiceDocs, setVoiceDocs] = useState(null);
+  const [voiceDrafts, setVoiceDrafts] = useState([]);
 
   const viewportRef = useRef(null);
   const boardRef = useRef(board);
+  const syncInfoRef = useRef(syncInfo);
+  const voiceControllerRef = useRef(null);
   const saveTimer = useRef(null);
   const statusTimer = useRef(null);
   const pendingSave = useRef(null);
@@ -135,6 +150,7 @@ export default function App() {
   const zoomTeaseRef = useRef({ direction: null, triggered: false });
 
   useEffect(() => { boardRef.current = board; }, [board]);
+  useEffect(() => { syncInfoRef.current = syncInfo; }, [syncInfo]);
   useEffect(() => { zoomRef.current = zoom; }, [zoom]);
   useEffect(() => { offsetRef.current = viewOffset; }, [viewOffset]);
   useEffect(() => { draggingRef.current = dragging; }, [dragging]);
@@ -1202,6 +1218,227 @@ export default function App() {
     }
   }, [settleSaveStatus, syncInfo]);
 
+  const adoptVoiceBoardResult = useCallback((result) => {
+    if (!result?.board) return;
+    const next = applyDefaults(result.board);
+    boardRef.current = next;
+    setBoard(next);
+    setSyncInfo(next.sync || null);
+  }, []);
+
+  const pushVoiceTranscript = useCallback((entry) => {
+    setVoiceTranscript((current) => {
+      const last = current[current.length - 1];
+      const nextEntry = {
+        ...entry,
+        text: String(entry.text || '').trimStart(),
+      };
+
+      if (!nextEntry.text) return current;
+
+      if (entry.partial && last?.partial && last.role === entry.role) {
+        return [
+          ...current.slice(0, -1),
+          { ...last, text: `${last.text}${entry.text}`, at: entry.at },
+        ].slice(-10);
+      }
+
+      return [...current, nextEntry].slice(-10);
+    });
+  }, []);
+
+  const getVoiceController = useCallback(() => {
+    const voiceApi = getVoiceApi();
+    if (!voiceApi) return null;
+
+    if (!voiceControllerRef.current) {
+      voiceControllerRef.current = new RealtimeVoiceController({
+        voiceApi,
+        getBoardSnapshot: () => createVoiceBoardSnapshot(boardRef.current, syncInfoRef.current),
+        onStatus: (status, detail) => {
+          setVoiceStatus(status);
+          setVoiceStatusDetail(detail);
+          if (status !== 'error') setVoiceError(null);
+        },
+        onTranscript: pushVoiceTranscript,
+        onToolResult: (_name, result) => {
+          adoptVoiceBoardResult(result);
+          if (Object.prototype.hasOwnProperty.call(result || {}, 'undoAvailable')) {
+            setVoiceUndoAvailable(Boolean(result?.undoAvailable));
+          }
+          if (result?.transactionId) flash('add');
+          if (result?.undoneTransactionId) flash('delete');
+        },
+        onError: (message) => {
+          setVoiceError(message);
+        },
+      });
+    }
+
+    return voiceControllerRef.current;
+  }, [adoptVoiceBoardResult, flash, pushVoiceTranscript]);
+
+  const loadVoiceSettings = useCallback(async () => {
+    const voiceApi = getVoiceApi();
+    if (!voiceApi) return;
+
+    const [settings, docs, drafts] = await Promise.all([
+      voiceApi.getSettings(),
+      voiceApi.readAssistantDocs(),
+      voiceApi.listTaskDrafts?.(),
+    ]);
+    setVoiceSettings(settings);
+    setVoiceHasApiKey(Boolean(settings.hasApiKey));
+    setVoiceDocs(docs);
+    const pendingDrafts = Array.isArray(drafts?.drafts) ? drafts.drafts : [];
+    setVoiceDrafts(pendingDrafts);
+    setVoiceStatus(current => {
+      if (pendingDrafts.length > 0 && (current === 'offline' || current === 'idle')) return 'draft';
+      return current === 'offline' ? 'idle' : current;
+    });
+  }, []);
+
+  const handleVoiceToggle = useCallback(async () => {
+    if (!electronRuntime) return;
+    const voiceApi = getVoiceApi();
+    if (!voiceApi) return;
+
+    try {
+      const hasKey = await voiceApi.hasApiKey();
+      setVoiceHasApiKey(Boolean(hasKey));
+      if (!hasKey) {
+        setVoicePanelOpen(true);
+        setVoiceError('OpenAI API key is required for voice.');
+        return;
+      }
+
+      await getVoiceController()?.toggleListening();
+    } catch (error) {
+      setVoiceError(error?.message || 'Voice failed');
+      setVoiceStatus('error');
+    }
+  }, [electronRuntime, getVoiceController]);
+
+  const handleVoiceUndo = useCallback(async () => {
+    const voiceApi = getVoiceApi();
+    if (!voiceApi) return;
+    try {
+      const result = await voiceApi.undoLastAction();
+      adoptVoiceBoardResult(result);
+      setVoiceUndoAvailable(Boolean(result.undoAvailable));
+      if (!result.ok && result.message) setVoiceError(result.message);
+      if (result.ok) flash('delete');
+    } catch (error) {
+      setVoiceError(error?.message || 'Undo failed');
+    }
+  }, [adoptVoiceBoardResult, flash]);
+
+  const handleVoiceSaveApiKey = useCallback(async () => {
+    const voiceApi = getVoiceApi();
+    if (!voiceApi || !voiceApiKeyDraft.trim()) return;
+    try {
+      await voiceApi.setApiKey(voiceApiKeyDraft.trim());
+      setVoiceApiKeyDraft('');
+      setVoiceHasApiKey(true);
+      setVoiceError(null);
+      await loadVoiceSettings();
+    } catch (error) {
+      setVoiceError(error?.message || 'API key save failed');
+    }
+  }, [loadVoiceSettings, voiceApiKeyDraft]);
+
+  const handleVoiceClearApiKey = useCallback(async () => {
+    const voiceApi = getVoiceApi();
+    if (!voiceApi) return;
+    await voiceApi.clearApiKey();
+    setVoiceHasApiKey(false);
+    voiceControllerRef.current?.closeConnection();
+    await loadVoiceSettings();
+  }, [loadVoiceSettings]);
+
+  const handleVoiceSaveSettings = useCallback(async () => {
+    const voiceApi = getVoiceApi();
+    if (!voiceApi || !voiceSettings) return;
+    try {
+      const next = await voiceApi.updateSettings({
+        shortcut: voiceSettings.shortcut,
+        model: voiceSettings.model,
+        voice: voiceSettings.voice,
+        reasoningEffort: voiceSettings.reasoningEffort,
+        contextMaxResults: voiceSettings.contextMaxResults,
+      });
+      setVoiceSettings(next);
+      voiceControllerRef.current?.closeConnection();
+    } catch (error) {
+      setVoiceError(error?.message || 'Voice settings save failed');
+    }
+  }, [voiceSettings]);
+
+  const handleVoiceRequestFolder = useCallback(async () => {
+    const voiceApi = getVoiceApi();
+    if (!voiceApi) return;
+    try {
+      const result = await voiceApi.requestFolderAccess('Voice assistant context');
+      if (result?.ok) await loadVoiceSettings();
+    } catch (error) {
+      setVoiceError(error?.message || 'Folder access failed');
+    }
+  }, [loadVoiceSettings]);
+
+  useEffect(() => {
+    if (!electronRuntime || !getVoiceApi()) return undefined;
+
+    loadVoiceSettings().catch(error => setVoiceError(error?.message || 'Voice settings failed'));
+    const voiceApi = getVoiceApi();
+    const unsubShortcut = voiceApi.onShortcut(() => handleVoiceToggle());
+    const unsubSettings = voiceApi.onSettingsChanged((settings) => {
+      setVoiceSettings(current => ({ ...(current || {}), ...settings }));
+      if (Object.prototype.hasOwnProperty.call(settings, 'hasApiKey')) {
+        setVoiceHasApiKey(Boolean(settings.hasApiKey));
+      }
+    });
+    const unsubOpenSettings = voiceApi.onOpenSettings(() => setVoicePanelOpen(true));
+    const unsubMemoryProposed = voiceApi.onMemoryProposed((proposal) => {
+      setVoicePanelOpen(true);
+      pushVoiceTranscript({
+        role: 'assistant',
+        text: `Memory proposal: ${proposal.content}`,
+        partial: false,
+        at: new Date().toISOString(),
+      });
+    });
+    const unsubDraftsChanged = voiceApi.onDraftsChanged?.((payload) => {
+      const drafts = Array.isArray(payload?.drafts) ? payload.drafts : [];
+      setVoiceDrafts(drafts);
+      if (drafts.length > 0) {
+        setVoiceStatus('draft');
+      }
+    });
+
+    return () => {
+      unsubShortcut?.();
+      unsubSettings?.();
+      unsubOpenSettings?.();
+      unsubMemoryProposed?.();
+      unsubDraftsChanged?.();
+      voiceControllerRef.current?.closeConnection(false);
+      voiceControllerRef.current = null;
+    };
+  }, [electronRuntime, handleVoiceToggle, loadVoiceSettings, pushVoiceTranscript]);
+
+  const voiceStatusLabel = useMemo(() => ({
+    offline: 'Voice offline',
+    idle: voiceHasApiKey ? 'Voice ready' : 'Voice setup',
+    connecting: 'Connecting...',
+    listening: 'Listening',
+    thinking: 'Thinking...',
+    searching: 'Searching context...',
+    acting: 'Updating board...',
+    draft: 'Draft pending',
+    done: 'Done',
+    error: 'Voice error',
+  }[voiceStatus] || 'Voice'), [voiceHasApiKey, voiceStatus]);
+
   return (
     <div className={`app-shell ${electronRuntime ? 'electron-runtime' : ''}`}>
       {/* Paper texture */}
@@ -1477,6 +1714,47 @@ export default function App() {
           <span className="save-indicator-tooltip">{saveStatusMeta.label}</span>
         </div>
         {electronRuntime && (
+          <>
+            <button
+              type="button"
+              className={`voice-toggle ${voiceStatus === 'listening' ? 'active' : ''} ${voiceStatus === 'error' ? 'error' : ''}`}
+              onClick={handleVoiceToggle}
+              title={voiceStatusLabel}
+              aria-label={voiceStatusLabel}
+            >
+              <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M12 3a3 3 0 00-3 3v5a3 3 0 006 0V6a3 3 0 00-3-3z" />
+                <path d="M19 10v1a7 7 0 01-14 0v-1" />
+                <path d="M12 18v3" />
+                <path d="M8 21h8" />
+              </svg>
+            </button>
+            {voiceUndoAvailable && (
+              <button
+                type="button"
+                className="voice-undo"
+                onClick={handleVoiceUndo}
+                title="Undo last voice action"
+                aria-label="Undo last voice action"
+              >
+                <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M9 14L4 9l5-5" />
+                  <path d="M4 9h10a6 6 0 010 12h-3" />
+                </svg>
+              </button>
+            )}
+            <button
+              type="button"
+              className="voice-settings-btn"
+              onClick={() => setVoicePanelOpen(current => !current)}
+              title="Voice settings"
+              aria-label="Voice settings"
+            >
+              V
+            </button>
+          </>
+        )}
+        {electronRuntime && (
           <button
             type="button"
             className={`sync-toggle ${syncInfo?.enabled ? 'active' : ''}`}
@@ -1494,6 +1772,111 @@ export default function App() {
           </button>
         )}
       </div>
+
+      {electronRuntime && voicePanelOpen && (
+        <div className="voice-panel" role="dialog" aria-label="Voice settings">
+          <div className="voice-panel-header">
+            <div>
+              <span className={`voice-status-dot ${voiceStatus}`} />
+              <strong>{voiceStatusLabel}</strong>
+            </div>
+            <button type="button" onClick={() => setVoicePanelOpen(false)} aria-label="Close voice settings">x</button>
+          </div>
+
+          {voiceError && <div className="voice-error">{voiceError}</div>}
+          {voiceStatusDetail && voiceStatus === 'error' && <div className="voice-error">{voiceStatusDetail}</div>}
+
+          <div className="voice-field-row">
+            <label>
+              API key
+              <input
+                type="password"
+                value={voiceApiKeyDraft}
+                onChange={e => setVoiceApiKeyDraft(e.target.value)}
+                placeholder={voiceHasApiKey ? 'Stored' : 'sk-...'}
+              />
+            </label>
+            <button type="button" onClick={handleVoiceSaveApiKey} disabled={!voiceApiKeyDraft.trim()}>Save</button>
+            <button type="button" onClick={handleVoiceClearApiKey} disabled={!voiceHasApiKey}>Clear</button>
+          </div>
+
+          <div className="voice-grid">
+            <label>
+              Shortcut
+              <input
+                value={voiceSettings?.shortcut || 'Alt+Space'}
+                onChange={e => setVoiceSettings(current => ({ ...(current || {}), shortcut: e.target.value }))}
+              />
+            </label>
+            <label>
+              Model
+              <input
+                value={voiceSettings?.model || 'gpt-realtime-2'}
+                onChange={e => setVoiceSettings(current => ({ ...(current || {}), model: e.target.value }))}
+              />
+            </label>
+            <label>
+              Voice
+              <input
+                value={voiceSettings?.voice || 'marin'}
+                onChange={e => setVoiceSettings(current => ({ ...(current || {}), voice: e.target.value }))}
+              />
+            </label>
+            <label>
+              Results
+              <input
+                type="number"
+                min="1"
+                max="20"
+                value={voiceSettings?.contextMaxResults || 8}
+                onChange={e => setVoiceSettings(current => ({ ...(current || {}), contextMaxResults: Number(e.target.value) }))}
+              />
+            </label>
+          </div>
+
+          <div className="voice-field-row">
+            <button type="button" onClick={handleVoiceSaveSettings}>Save settings</button>
+            <button type="button" onClick={handleVoiceRequestFolder}>Allow folder</button>
+            <button type="button" onClick={handleVoiceUndo} disabled={!voiceUndoAvailable}>Undo voice action</button>
+          </div>
+
+          <div className="voice-context-list">
+            {(voiceSettings?.allowedFolders || []).length > 0
+              ? voiceSettings.allowedFolders.map(folder => <span key={folder}>{folder}</span>)
+              : <span>No extra context folders</span>}
+          </div>
+
+          {voiceDrafts.length > 0 && (
+            <div className="voice-drafts">
+              <strong>Pending drafts</strong>
+              {voiceDrafts.slice(-3).map((draft) => (
+                <div className="voice-draft" key={draft.id}>
+                  <span>{draft.title || draft.reason || 'Task draft'}</span>
+                  <small>{draft.tasks?.length || 0} task{draft.tasks?.length === 1 ? '' : 's'} waiting for approval</small>
+                </div>
+              ))}
+            </div>
+          )}
+
+          <div className="voice-transcript">
+            {voiceTranscript.length > 0
+              ? voiceTranscript.slice(-5).map((entry, index) => (
+                <p key={`${entry.at}-${index}`} className={`voice-line ${entry.role}`}>
+                  <span>{entry.role === 'user' ? 'You' : 'Voice'}</span>
+                  {entry.text}
+                </p>
+              ))
+              : <p className="voice-line muted">Tap the mic, speak, then tap again.</p>}
+          </div>
+
+          {voiceDocs && (
+            <div className="voice-doc-paths">
+              <span>{voiceDocs.memoryPath}</span>
+              <span>{voiceDocs.voiceTonePath}</span>
+            </div>
+          )}
+        </div>
+      )}
 
       {/* Hint */}
       <div className="canvas-hint">

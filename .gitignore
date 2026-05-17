@@ -4,7 +4,7 @@ release
 *.dmg
 *.zip
 *.blockmap
-latest*.yml
-beta*.yml
+/latest*.yml
+/beta*.yml
 .env
 .DS_Store
