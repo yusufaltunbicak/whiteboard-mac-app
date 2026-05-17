@@ -26,6 +26,7 @@ function createConfig({
     files: [
       'dist/**/*',
       'electron/**/*',
+      'src/boardActions.js',
       'package.json',
     ],
     extraMetadata: {

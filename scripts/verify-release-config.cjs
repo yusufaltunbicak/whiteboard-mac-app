@@ -13,6 +13,7 @@ assert.equal(stable.publish.channel, 'latest');
 assert.equal(stable.publish.releaseType, 'release');
 assert.equal(stable.directories.output, 'release/stable');
 assert.equal(stable.extraMetadata.name, 'whiteboard-mac-app');
+assert.ok(stable.files.includes('src/boardActions.js'));
 
 assert.equal(beta.appId, 'com.yusufaltunbicak.whiteboardtodos.beta');
 assert.equal(beta.productName, 'Whiteboard Todos Beta');
@@ -21,6 +22,7 @@ assert.equal(beta.publish.releaseType, 'prerelease');
 assert.equal(beta.directories.output, 'release/beta');
 assert.equal(beta.extraMetadata.name, 'whiteboard-mac-app-beta');
 assert.match(beta.extraMetadata.version, /^\d+\.\d+\.\d+-beta\.\d+$/);
+assert.ok(beta.files.includes('src/boardActions.js'));
 
 assert.notEqual(stable.appId, beta.appId);
 assert.notEqual(stable.productName, beta.productName);
