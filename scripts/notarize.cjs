@@ -11,9 +11,11 @@ function buildAuthorizationOptions() {
   }
 
   if (process.env.APPLE_API_KEY && process.env.APPLE_API_ISSUER) {
+    const inferredKeyId = path.basename(process.env.APPLE_API_KEY).match(/^AuthKey_(.+)\.p8$/)?.[1];
     return {
       appleApiKey: process.env.APPLE_API_KEY,
       appleApiIssuer: process.env.APPLE_API_ISSUER,
+      appleApiKeyId: process.env.APPLE_API_KEY_ID || inferredKeyId,
     };
   }
 

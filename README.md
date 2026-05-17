@@ -82,6 +82,15 @@ APPLE_KEYCHAIN_PROFILE=notarytool-profile-name \
 npm run dist
 ```
 
+Or with an App Store Connect API key:
+
+```bash
+NOTARIZE=true \
+APPLE_API_KEY=~/.private_keys/AuthKey_KEYID.p8 \
+APPLE_API_ISSUER=issuer-uuid \
+npm run dist
+```
+
 The packaging config produces DMG + ZIP artifacts for macOS arm64. The ZIP and generated update metadata are used by `electron-updater`; the DMG is the user-facing download.
 
 ## Updates
